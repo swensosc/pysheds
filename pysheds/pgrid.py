@@ -1720,13 +1720,14 @@ class Grid(object):
         return self._output_handler(data=dist, out_name=out_name, properties=properties,
                                     inplace=inplace, metadata=metadata)
 
-    def compute_hand(self, fdir, dem, drainage_mask, out_name='hand', dirmap=None,
+    def compute_hand(self, fdir, dem, channel_mask, channel_id, out_name='hand', dirmap=None,
                      nodata_in_fdir=None, nodata_in_dem=None, nodata_out=np.nan, routing='d8',
                      inplace=True, apply_mask=False, ignore_metadata=False, return_index=False,
                      **kwargs):
         """
         Computes the height above nearest drainage (HAND), based on a flow direction grid,
         a digital elevation grid, and a grid containing the locations of drainage channels.
+        Also calculate distance from nearest drainage (DTND).
  
         Parameters
         ----------
@@ -1738,9 +1739,14 @@ class Grid(object):
               Digital elevation data.
               If str: name of the dataset to be viewed.
               If Raster: a Raster instance (see pysheds.view.Raster)
-        drainage_mask : str or Raster
+        channel_mask : str or Raster
                         Boolean raster or ndarray with nonzero elements indicating
                         locations of drainage channels.
+                        If str: name of the dataset to be viewed.
+                        If Raster: a Raster instance (see pysheds.view.Raster)
+        channel_id : str or Raster
+                        Raster or ndarray with nonzero elements indicating
+                        ids of drainage channels.
                         If str: name of the dataset to be viewed.
                         If Raster: a Raster instance (see pysheds.view.Raster)
         out_name : string
@@ -1787,6 +1793,10 @@ class Grid(object):
         mask = self._input_handler(drainage_mask, apply_mask=apply_mask, nodata_view=0,
                                    properties=properties, ignore_metadata=ignore_metadata,
                                    **kwargs)
+        channel_id = self._input_handler(channel_id, apply_mask=apply_mask, nodata_view=0,
+                                   properties=properties, ignore_metadata=ignore_metadata,
+                                   **kwargs)
+
         assert (np.asarray(dem.shape) == np.asarray(fdir.shape)).all()
         assert (np.asarray(dem.shape) == np.asarray(mask.shape)).all()
         if routing.lower() == 'dinf':
@@ -1864,9 +1874,35 @@ class Grid(object):
                         break
                     hand[child] = hand[parent]
                     source = child
-                hand = hand.reshape(dem.shape)
+                hndx = hand.reshape(dem.shape)
                 if not return_index:
-                    hand = np.where(hand != -1, dem - dem.flat[hand], nodata_out)
+                    hand = np.where(hndx != -1, dem - dem.flat[hndx], nodata_out)
+
+                    # calculate channel id of nearest drainage
+                    drainage_id = np.zeros(hndx.shape)
+                    drainage_id = np.where(hndx != -1, channel_id.flat[hndx], nodata_out) 
+                    self._output_handler(data=drainage_id, out_name='drainage_id', properties=properties,inplace=inplace, metadata=metadata)
+
+                    # calculate distance to nearest channel
+                    # assumes lon2d/lat2d have been added to self previous to call
+                    dtnd = np.zeros(dem.shape)
+                    lon2d = self._input_handler('lon2d', apply_mask=apply_mask, nodata_view=nodata_in_dem,properties=properties, ignore_metadata=ignore_metadata,**kwargs)
+                    lat2d = self._input_handler('lat2d', apply_mask=apply_mask, nodata_view=0,properties=properties, ignore_metadata=ignore_metadata,**kwargs)
+
+                    dlon = lon2d-lon2d.flat[hndx]
+                    dlat = lat2d-lat2d.flat[hndx]
+                    dlon = np.pi/180.*dlon
+                    dlat = np.pi/180.*dlat
+                    # haversine formula
+                    dtnd = np.power(np.sin(dlat/2),2) + np.cos(np.pi/180.*lat2d) * np.cos(np.pi/180.*lat2d.flat[hndx]) * np.power(np.sin(dlon/2),2)
+                    dtnd[dtnd > 1] = 1
+                    dtnd[dtnd < 0] = 0
+                    dtnd = (6.371e6 * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
+                    #dtnd = np.where(hndx != -1, dtnd, nodata_out) 
+                    dtnd = np.where(hndx != -1, dtnd, 0) 
+
+                    self._output_handler(data=dtnd, out_name='dtnd', properties=properties,inplace=inplace, metadata=metadata)
+
             except:
                 raise
             finally:
@@ -1875,6 +1911,456 @@ class Grid(object):
                 self._replace_rim(mask, maskleft, maskright, masktop, maskbottom)
             return self._output_handler(data=hand, out_name=out_name, properties=properties,
                                         inplace=inplace, metadata=metadata)
+
+
+    def consistent_channel_mask(self, fdir, dem, channel_coords, channel_ids, out_name='channel_mask', out_name_channel_id='channel_id', out_name_bank='bank_mask',dirmap=None, nodata_in_fdir=None, nodata_in_dem=None, nodata_out=np.nan, routing='d8', inplace=True, apply_mask=False, ignore_metadata=False, **kwargs):
+        """
+        use output of extract_river_network to create a channel mask 
+        that is consistent with flow direction map
+
+        Parameters
+        ----------
+        fdir : str or Raster
+               Flow direction data.
+               If str: name of the dataset to be viewed.
+               If Raster: a Raster instance (see pysheds.view.Raster)
+        dem : str or Raster
+              Digital elevation data.
+              If str: name of the dataset to be viewed.
+              If Raster: a Raster instance (see pysheds.view.Raster)
+        channel_coords : ndarray of coordinates of drainage channels.
+        channel_ids : ndarray of ids of drainage channels.
+        out_name : string
+                   Name of attribute containing new catchment array.
+        dirmap : list or tuple (length 8)
+                 List of integer values representing the following
+                 cardinal and intercardinal directions (in order):
+                 [N, NE, E, SE, S, SW, W, NW]
+        nodata_in_fdir : int or float
+                         Value to indicate nodata in flow direction input array.
+        nodata_in_dem : int or float
+                        Value to indicate nodata in digital elevation input array.
+        nodata_out : int or float
+                     Value to indicate nodata in output array.
+        routing : str
+                  Routing algorithm to use:
+                  'd8'   : D8 flow directions
+                  'dinf' : D-infinity flow directions (not implemented)
+
+        """
+        nodata_in_fdir = self._check_nodata_in(fdir, nodata_in_fdir)
+        nodata_in_dem = self._check_nodata_in(dem, nodata_in_dem)
+
+        properties = {'nodata' : nodata_out}
+        # TODO: This will overwrite metadata if provided
+        metadata = {'dirmap' : dirmap}
+
+        fdir = self._input_handler(fdir, apply_mask=apply_mask, nodata_view=nodata_in_fdir, properties=properties, ignore_metadata=ignore_metadata,**kwargs)
+
+        dem = self._input_handler(dem, apply_mask=apply_mask, nodata_view=nodata_in_dem, properties=properties, ignore_metadata=ignore_metadata, **kwargs)
+
+        fjm, fim = fdir.shape
+        flon,flat = self.view('lon2d')[0,:],self.view('lat2d')[:,0]
+
+        dmask = np.zeros((fjm,fim))
+        dids  = np.zeros((fjm,fim))
+        dmask_ndx  = []
+        dmask_undx = []
+
+        dirmap = self._set_dirmap(dirmap, fdir)
+        dir_to_index_dict  = {dirmap[n]:n for n in range(len(dirmap))}
+        r_dirmap = np.array(dirmap)[[4, 5, 6, 7, 0, 1, 2, 3]].tolist()
+        rdir_to_index_dict = {r_dirmap[n]:n for n in range(len(r_dirmap))}
+
+        # W -> E
+        addi = [0,1,1,1,0,-1,-1,-1]
+        # determine direction of latitude coordinates
+        latdir = (flat[1] - flat[0])
+        if latdir > 0:
+            # S -> N
+            addj = [1,1,0,-1,-1,-1,0,1]
+        else:
+            # N -> S
+            addj = [-1,-1,0,1,1,1,0,-1]
+
+        unique_ids = np.unique(channel_ids).astype(np.int)
+        for n in range(unique_ids.size):
+
+            ind = np.where(unique_ids[n] == channel_ids)[0]
+            # record network elevation and indices
+            reach_elev = []
+            reach_j = []
+            reach_i = []
+            for k in range(ind.size):
+                ni = np.argmin(np.abs(channel_coords[ind[k],0] - flon))
+                nj = np.argmin(np.abs(channel_coords[ind[k],1] - flat))
+                reach_elev.append(dem[nj,ni])
+                reach_j.append(nj)
+                reach_i.append(ni)
+
+            # locate highest elevation point in reach
+            k1 = np.argmax(np.asarray(reach_elev))
+            j0,i0 = reach_j[k1],reach_i[k1]
+
+            # record index of each point in dmask and upstream neighbor
+            if fdir[j0,i0] < 1:
+                continue
+            else:
+                dmask_undx.append(-1)
+                dmask_ndx.append(np.ravel_multi_index([j0,i0],(fjm,fim)))
+
+            # follow gridded directions downstream
+            cnt = 0
+            while fdir[j0,i0] > 0 and cnt < fim*fjm:
+                if dmask[j0,i0] >= 1:
+                    break
+
+                dmask_undx.append(np.ravel_multi_index([j0,i0],(fjm,fim)))
+                dmask[j0,i0] += 1
+                dids[j0,i0] = unique_ids[n]
+                ddir = fdir[j0,i0]
+                m = dir_to_index_dict[ddir]
+                i0 += addi[m]
+                j0 += addj[m]
+                check_i = np.logical_or(i0 < 0,i0 >= fim)
+                check_j = np.logical_or(j0 < 0,j0 >= fjm)
+                #if check_i or check_j:
+                if check_i or check_j or (fdir[j0,i0] < 1):
+                    #dmask_ndx.append(-1)
+                    del dmask_undx[-1]
+                    break
+                dmask_ndx.append(np.ravel_multi_index([j0,i0],(fjm,fim)))
+                if fdir.flat[dmask_ndx[-1]] < 1:
+                    print(fdir[j0,i0],fdir.flat[dmask_ndx[-1]])
+                    stop
+                cnt += 1
+
+        dmask = np.where(dmask > 0,1,0)
+
+        dmask_ndx  = np.array(dmask_ndx)
+        dmask_undx = np.array(dmask_undx)
+        if dmask_ndx.size != dmask_undx.size:
+            # arrays must be equal in size
+            print('dmask index sizes ',dmask_ndx.size,dmask_undx.size)
+            stop
+
+        # create mask of left/right banks
+        # for every point in channel_mask, find upstream and downstream 
+        # neighbor, assign integer value clockwise from north
+        # values greater than downstream and less than upstream are 
+        # right bank
+
+        nind = np.arange(8,dtype=np.int)
+        bank_mask = np.zeros(fdir.shape)  
+        # for each gridcell in source, identify 8 neighbors
+        selection = self._select_surround_ravel(dmask_ndx, fdir.shape)
+
+        for k in range(dmask_ndx.size):
+            ddir = dir_to_index_dict[fdir.flat[dmask_ndx[k]]]
+            if dmask_undx[k] >= 0:
+                udir = rdir_to_index_dict[fdir.flat[dmask_undx[k]]]
+            else:
+                udir = rdir_to_index_dict[fdir.flat[dmask_ndx[k]]]
+
+            if udir > ddir:
+                rind = np.logical_and(nind > ddir, nind < udir)
+                lind = np.logical_or(nind < ddir, nind > udir)
+            else:
+                rind = np.logical_or(nind > ddir, nind < udir)
+                lind = np.logical_and(nind < ddir, nind > udir)
+
+            ind = selection[k,rind]
+            ind = ind[np.logical_and(ind >= 0, ind < bank_mask.size)]
+            bank_mask.flat[ind] += 1
+            ind = selection[k,lind]
+            ind = ind[np.logical_and(ind >= 0, ind < bank_mask.size)]
+            bank_mask.flat[ind] -= 1
+
+        # set banks to 1
+        bank_mask[bank_mask >= 1]  =  1
+        bank_mask[bank_mask <= -1] = -1
+        # set channel to zero
+        bank_mask[dmask > 0] = 0
+
+        # save bank mask
+        self._output_handler(data=bank_mask, out_name=out_name_bank, properties=properties,inplace=inplace, metadata=metadata)
+        # save channel ids
+        self._output_handler(data=dids, out_name=out_name_channel_id, properties=properties,inplace=inplace, metadata=metadata)
+        # save channel mask
+        return self._output_handler(data=dmask, out_name=out_name, properties=properties,inplace=inplace, metadata=metadata)
+
+    def compute_hillslope(self, fdir, channel_mask, bank_mask, out_name='hillslope', dirmap=None,
+                     nodata_in_fdir=None, nodata_in_mask=None, nodata_out=np.nan, routing='d8',
+                     inplace=True, apply_mask=False, ignore_metadata=False, **kwargs):
+        """
+        Computes the hillslope form (right/left bank; headwater), 
+        based on a flow direction grid, a digital elevation grid, 
+        and a grid containing the locations of drainage channels.
+ 
+        Parameters
+        ----------
+        fdir : str or Raster
+               Flow direction data.
+               If str: name of the dataset to be viewed.
+               If Raster: a Raster instance (see pysheds.view.Raster)
+        channel_mask : str or Raster
+                        Boolean raster or ndarray with nonzero elements indicating
+                        locations of drainage channels.
+                        If str: name of the dataset to be viewed.
+                        If Raster: a Raster instance (see pysheds.view.Raster)
+        bank_mask : str or Raster
+                        Raster or ndarray with nonzero elements indicating
+                        locations of channel banks.
+                        If str: name of the dataset to be viewed.
+                        If Raster: a Raster instance (see pysheds.view.Raster)
+        out_name : string
+                   Name of attribute containing new catchment array.
+        dirmap : list or tuple (length 8)
+                 List of integer values representing the following
+                 cardinal and intercardinal directions (in order):
+                 [N, NE, E, SE, S, SW, W, NW]
+        nodata_in_fdir : int or float
+                         Value to indicate nodata in flow direction input array.
+        nodata_in_dem : int or float
+                        Value to indicate nodata in digital elevation input array.
+        nodata_out : int or float
+                     Value to indicate nodata in output array.
+        routing : str
+                  Routing algorithm to use:
+                  'd8'   : D8 flow directions
+                  'dinf' : D-infinity flow directions (not implemented)
+        recursionlimit : int
+                         Recursion limit--may need to be raised if
+                         recursion limit is reached.
+        inplace : bool
+                  If True, write output array to self.<out_name>.
+                  Otherwise, return the output array.
+        apply_mask : bool
+               If True, "mask" the output using self.mask.
+        ignore_metadata : bool
+                          If False, require a valid affine transform and crs.
+        """
+        # TODO: Why does this use set_dirmap but flowdir doesn't?
+        dirmap = self._set_dirmap(dirmap, fdir)
+        r_dirmap = np.array(dirmap)[[4, 5, 6, 7, 0, 1, 2, 3]].tolist()
+
+        nodata_in_fdir = self._check_nodata_in(fdir, nodata_in_fdir)
+        nodata_in_mask = self._check_nodata_in(channel_mask, nodata_in_mask)
+        properties = {'nodata' : nodata_out}
+        # TODO: This will overwrite metadata if provided
+        metadata = {'dirmap' : dirmap}
+        # initialize array to collect catchment cells
+        fdir = self._input_handler(fdir, apply_mask=apply_mask, nodata_view=nodata_in_fdir,
+                                   properties=properties, ignore_metadata=ignore_metadata,
+                                   **kwargs)
+        channel_mask = self._input_handler(channel_mask, apply_mask=apply_mask, nodata_view=0,
+                                   properties=properties, ignore_metadata=ignore_metadata,
+                                   **kwargs)
+        bank_mask = self._input_handler(bank_mask, apply_mask=apply_mask, nodata_view=0,
+                                   properties=properties, ignore_metadata=ignore_metadata,
+                                   **kwargs)
+
+        assert (np.asarray(fdir.shape) == np.asarray(channel_mask.shape)).all()
+        assert (np.asarray(fdir.shape) == np.asarray(bank_mask.shape)).all()
+        if routing.lower() == 'd8':
+            try:
+                
+                dirleft, dirright, dirtop, dirbottom = self._pop_rim(fdir, nodata=nodata_in_fdir)
+                maskleft, maskright, masktop, maskbottom = self._pop_rim(channel_mask, nodata=0)
+
+                # propagate bank_mask values uphill
+                # source contains indices of nonzero bank_mask values
+                rsource = np.flatnonzero(bank_mask*(bank_mask > 0))
+                lsource = np.flatnonzero(bank_mask*(bank_mask < 0))
+                hsource = np.flatnonzero(channel_mask)
+
+                cndx = np.flatnonzero(channel_mask)
+
+                # bank will be the indices of the nearest drainage point
+                rbank = -np.ones(fdir.shape, dtype=np.int)
+                # initialize bank to bank_mask plus dmask (to limit search)
+                rbank.flat[rsource] = 1
+                rbank.flat[cndx] = 1 
+                # set rbank to initial value over lsource; later return to zero
+                rbank.flat[lsource] = 1
+                
+                lbank = -np.ones(fdir.shape, dtype=np.int)
+                lbank.flat[lsource] = 1
+                lbank.flat[cndx] = 1 
+                lbank.flat[rsource] = 1 # zero later
+
+                hbank = -np.ones(fdir.shape, dtype=np.int)
+                hbank.flat[hsource] = 1
+                # set hbank to initial value over rsource/lsource; later return to zero
+                hbank.flat[rsource] = 1 # zero later
+                hbank.flat[lsource] = 1 # zero later
+
+                # right bank search
+                for _ in range(fdir.size):
+                    # for each gridcell in source, identify 8 neighbors
+                    selection = self._select_surround_ravel(rsource, fdir.shape)
+
+                    # ensure selection within grid
+                    selection[selection > (fdir.size-1)] = fdir.size-1
+                    selection[selection < 0] = 0
+
+                    # if fdir matches r_dirmap, it means that
+                    # neighbor flows to the source gridcell
+                    # also, only select cells that have not been identified
+                    ix = (fdir.flat[selection] == r_dirmap) & (rbank.flat[selection] < 0)
+                    child = selection[ix]
+                    if not child.size:
+                        break
+                    # assign the upstream cell 
+                    rbank.flat[child] = 1
+                    # reset source to these upstream cells and repeat until
+                    # no upstream cells found
+                    rsource = child
+                    
+                # left bank search
+                for _ in range(fdir.size):
+                    # for each gridcell in source, identify 8 neighbors
+                    selection = self._select_surround_ravel(lsource, fdir.shape)
+
+                    # ensure selection within grid
+                    selection[selection > (fdir.size-1)] = fdir.size-1
+                    selection[selection < 0] = 0
+
+                    # if fdir matches r_dirmap, it means that
+                    # neighbor flows to the source gridcell
+                    # also, only select cells that have not been identified
+                    ix = (fdir.flat[selection] == r_dirmap) & (lbank.flat[selection] < 0)
+                    child = selection[ix]
+                    if not child.size:
+                        break
+                    # assign the upstream cell
+                    lbank.flat[child] = 1
+                    # reset source to these upstream cells and repeat until
+                    # no upstream cells found
+                    lsource = child
+
+                # headwaters search
+                for _ in range(fdir.size):
+                    # for each gridcell in source, identify 8 neighbors
+                    selection = self._select_surround_ravel(hsource, fdir.shape)
+
+                    # ensure selection within grid
+                    selection[selection > (fdir.size-1)] = fdir.size-1
+                    selection[selection < 0] = 0
+
+                    # if fdir matches r_dirmap, it means that
+                    # neighbor flows to the source gridcell
+                    # also, only select cells that have not been identified
+                    ix = (fdir.flat[selection] == r_dirmap) & (hbank.flat[selection] < 0)
+                    # TODO: Not optimized (a lot of copying here)
+                    child = selection[ix]
+                    if not child.size:
+                        break
+                    # assign the upstream cell
+                    hbank.flat[child] = 1
+                    # reset source to these upstream cells and repeat until
+                    # no upstream cells found
+                    hsource = child
+
+                # original source cells
+                rsource = np.flatnonzero(bank_mask*(bank_mask > 0))
+                lsource = np.flatnonzero(bank_mask*(bank_mask < 0))
+                # set channel and left bank values to zero
+                rbank.flat[lsource] = 0
+                rbank.flat[cndx] = 0
+                # set channel and right bank values to zero
+                lbank.flat[rsource] = 0
+                lbank.flat[cndx] = 0
+                # set right/left bank values to zero
+                hbank.flat[rsource] = 0
+                hbank.flat[lsource] = 0
+                
+                # combine fields
+                hillslope = np.zeros(fdir.shape)
+                hillslope[hbank > 0] = 1
+                hillslope[rbank > 0] = 2
+                hillslope[lbank > 0] = 3
+                # reset channel after hillslopes
+                hillslope.flat[cndx] = 4
+            except:
+                raise
+            finally:
+                self._replace_rim(fdir, dirleft, dirright, dirtop, dirbottom)
+            return self._output_handler(data=hillslope, out_name=out_name, properties=properties, inplace=inplace, metadata=metadata)
+
+    def slope_aspect(self, dem, slope_out_name='slope', aspect_out_name='aspect',
+                     nodata_in_dem=None, nodata_out=np.nan,
+                     inplace=True, apply_mask=False, ignore_metadata=False, **kwargs):
+        """
+        Computes the slope and aspect from a digital elevation grid.
+ 
+        Parameters
+        ----------
+        dem : str or Raster
+              Digital elevation data.
+              If str: name of the dataset to be viewed.
+              If Raster: a Raster instance (see pysheds.view.Raster)
+        slope_out_name : string
+                   Name of attribute containing slope array.
+        aspect_out_name : string
+                   Name of attribute containing aspect array.
+        nodata_in_dem : int or float
+                        Value to indicate nodata in digital elevation input array.
+        nodata_out : int or float
+                     Value to indicate nodata in output array.
+        inplace : bool
+                  If True, write output array to self.<out_name>.
+                  Otherwise, return the output array.
+        apply_mask : bool
+               If True, "mask" the output using self.mask.
+        ignore_metadata : bool
+                          If False, require a valid affine transform and crs.
+        """
+
+        nodata_in_dem = self._check_nodata_in(dem, nodata_in_dem)
+        properties = {'nodata' : nodata_out}
+        metadata = {}
+
+        # initialize array
+        dem = self._input_handler(dem, apply_mask=apply_mask, nodata_view=nodata_in_dem,
+                                  properties=properties, ignore_metadata=ignore_metadata,
+                                  **kwargs)
+
+        if 1 == 1:
+            try:
+                if nodata_in_dem is None:
+                    dem_mask = np.array([]).astype(int)
+                else:
+                    if np.isnan(nodata_in_dem):
+                        dem_mask = np.where(np.isnan(dem.ravel()))[0]
+                    else:
+                        dem_mask = np.where(dem.ravel() == nodata_in_dem)[0]
+                # Make sure nothing flows to the nodata cells
+                dem.flat[dem_mask] = dem.max() + 1
+                inside = self._inside_indices(dem, mask=dem_mask)
+                grad = self._gradient_horn_1981(dem, inside)
+
+                dzdx = grad[0]
+                dzdy = grad[1]
+
+                # calculate slope from gradient
+                slope = np.zeros(dem.shape)
+                slope.flat[inside] = np.sqrt(dzdx*dzdx+dzdy*dzdy)
+                # calculate aspect from gradient
+                aspect = np.zeros(dem.shape)
+                # steepest descent is along the negative of the gradient
+                aspect.flat[inside] = (180.0/np.pi)*np.arctan2(-dzdx,-dzdy)
+
+                # convert from [-180,180] to [0-360]
+                aspect[(aspect < 0)]+=360
+                
+                self._output_handler(data=slope, out_name=slope_out_name, properties=properties,inplace=inplace, metadata=metadata)
+                self._output_handler(data=aspect, out_name=aspect_out_name, properties=properties,inplace=inplace, metadata=metadata)
+
+            except:
+                raise
+            return #self._output_handler(data=hand, out_name=out_name, properties=properties,
+                   #                     inplace=inplace, metadata=metadata)
 
 
     def cell_area(self, out_name='area', nodata_out=0, inplace=True, as_crs=None):
@@ -3450,6 +3936,46 @@ class Grid(object):
         has_lec = pd.Series(has_lec, index=flatlabels).groupby(level=0).any()
         no_lec = has_lec[~has_lec].index.values
         return no_lec, labels, numlabels, neighbor_elevs, flatlabels
+
+    def _gradient_horn_1981(self, dem, inside):
+        """
+        Calculate gradient of a dem.
+        """
+        np.warnings.filterwarnings(action='ignore', message='Invalid value encountered',
+                                   category=RuntimeWarning)
+        # eight surrounding indices ordered as [N,NE,E,SE,S,SW,W,NW]
+        inner_neighbors = self._select_surround_ravel(inside, dem.shape).T
+
+        # elevation of central gridpoint's neighbors
+        elev_neighbors = dem.flat[inner_neighbors]
+
+        lon2d = (np.pi/180.)*self.view('lon2d') # radians
+        lat2d = (np.pi/180.)*self.view('lat2d') # radians
+        dlon = np.subtract(lon2d.flat[inner_neighbors], lon2d.flat[inside])
+        dlat = np.subtract(lat2d.flat[inner_neighbors], lat2d.flat[inside])
+
+        # convert to meters
+        re = 6.371e6        
+        dx = re * np.abs(np.multiply(dlon,np.cos(lat2d.flat[inside])))
+        dy = re * np.abs(dlat)
+        # use degrees
+        #dx = (180./np.pi)*np.abs(dlon)
+        #dy = (180./np.pi)*np.abs(dlat)
+
+        mean_dx = 0.5 * np.sum(dx[[2,6],:],axis=0) # average dx west and east
+        mean_dy = 0.5 * np.sum(dy[[0,4],:],axis=0) # average dy south and north
+        
+        # for x gradient sum [NE,2xE,SE,-NW,-2xW,-SW]
+        # for y gradient sum [NE,2xN,NW,-SE,-2xS,-SW]
+        haxindices = [1,2,2,3]  #add
+        hsxindices = [5,6,6,7]  #subtract
+        hayindices = [0,0,1,7]  #add
+        hsyindices = [3,4,4,5]  #subtract
+
+        dzdx = (np.sum(elev_neighbors[haxindices,:],axis=0) - np.sum(elev_neighbors[hsxindices,:],axis=0)) / (8.*mean_dx)
+        dzdy = (np.sum(elev_neighbors[hayindices,:],axis=0) - np.sum(elev_neighbors[hsyindices,:],axis=0)) / (8.*mean_dy)
+        
+        return [dzdx,dzdy]
 
     def polygonize(self, data=None, mask=None, connectivity=4, transform=None):
         """
