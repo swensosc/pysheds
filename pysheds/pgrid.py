@@ -1911,7 +1911,7 @@ class Grid(object):
 
                     # calculate channel id of nearest drainage
                     drainage_id = np.zeros(hndx.shape)
-                    drainage_id = np.where(hndx != -1, channel_id.flat[hndx], nodata_out).astype(int)
+                    drainage_id = np.where(hndx != -1, channel_id.flat[hndx], -1).astype(int)
                     self._output_handler(data=drainage_id, out_name='drainage_id', properties=properties,inplace=inplace, metadata=metadata)
 
                     # calculate distance to nearest channel
@@ -3662,6 +3662,16 @@ class Grid(object):
                 'reach_slopes':reach_slopes,'reach_lengths':reach_length,
                 'mlon':rlon,'mlat':rlat}
 
+    def _translate_dict(self,a,d):
+        # a is an array of direction values (1,2,4,8,32,64,128)
+        # d is a dictionary that translates a into the items in d
+
+        # initialize n to -1 b/c dirmap values are [0-7]
+        n = -np.ones(a.shape)
+        for k in d.keys():
+            n[a == k] = d[k]
+        return n
+
     def create_channel_mask(self, fdir, mask, out_name='channel_mask', out_name_channel_id='channel_id', out_name_bank='bank_mask',dirmap=None, nodata_in=None, nodata_out=np.nan, routing='d8', inplace=True, apply_mask=False, ignore_metadata=False, **kwargs):
 
         """
@@ -3742,11 +3752,11 @@ class Grid(object):
             for index, profile in enumerate(profiles):
                 selection = self._select_surround_ravel(profile, fdir.shape)
 
-                ddir = loop_translate(fdir.flat[profile],dir_to_index_dict)
+                ddir = self._translate_dict(fdir.flat[profile],dir_to_index_dict)
                 undx = np.roll(profile,1)
                 # give head its own index as upstream index
                 undx[0] = profile[0]
-                udir = loop_translate(fdir.flat[undx],rdir_to_index_dict)
+                udir = self._translate_dict(fdir.flat[undx],rdir_to_index_dict)
 
                 rind1 = np.asarray([np.logical_and(nind > dd, nind < ud) for dd,ud in zip(ddir,udir)])
                 rind2 = np.asarray([np.logical_or(nind > dd, nind < ud)  for dd,ud in zip(ddir,udir)])
@@ -4037,12 +4047,6 @@ class Grid(object):
                                                     np.arange(np.count_nonzero(pits_bool))]])
         return self._output_handler(data=dem_out, out_name=out_name, properties=grid_props,
                                     inplace=inplace, metadata=metadata)
-
-    def loop_translate(a,d):
-        n = np.ndarray(a.shape)
-        for k in d:
-            n[a == k] = d[k]
-            return n
 
     def _select_surround(self, i, j):
         """
