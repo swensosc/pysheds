@@ -5,9 +5,13 @@
 This fork includes a few additional terrain analysis methods.
 
 These include:
+
 Distance and angle to nearest drainage
+
 Hillslope form (right bank, left bank, and headwater)
+
 Topographic slope and aspect
+
 River network length and slope
 
 # Citing
