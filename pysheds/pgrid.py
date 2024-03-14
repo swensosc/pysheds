@@ -154,10 +154,10 @@ class Grid(object):
                 nodata = data.nodata
                 mask = data.mask
         else:
-            if mask is None:
-                mask = np.ones(shape, dtype=np.bool)
             if shape is None:
                 shape = data.shape
+            if mask is None:
+                mask = np.ones(shape, dtype=np.bool)
         if not isinstance(data, np.ndarray):
             raise TypeError('Input data must be ndarray')
         # if there are no datasets, initialize bbox, shape,
