@@ -146,6 +146,7 @@ class Grid(object):
                    metadata={'dirmap' : (64, 128, 1, 2, 4, 8, 16, 32),
                              'routing' : 'd8'}
         """
+
         if isinstance(data, Raster):
             if affine is None:
                 affine = data.affine
@@ -1749,7 +1750,7 @@ class Grid(object):
 
     def compute_hand(self, fdir, dem, channel_mask, channel_id, out_name='hand', dirmap=None,
                      nodata_in_fdir=None, nodata_in_dem=None, nodata_out=np.nan, routing='d8',
-                     inplace=True, apply_mask=False, ignore_metadata=False, return_index=False,
+                     inplace=True, apply_mask=False, ignore_metadata=False, return_index=False, geographic=True,
                      **kwargs):
         """
         Computes the height above nearest drainage (HAND), based on a flow direction grid,
@@ -1920,11 +1921,15 @@ class Grid(object):
                     dlon = lon2d-lon2d.flat[hndx]
                     dlat = lat2d-lat2d.flat[hndx]
                     dtr = np.pi/180
-                    # haversine formula
-                    dtnd = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*lat2d) * np.cos(dtr*lat2d.flat[hndx]) * np.power(np.sin(dtr*dlon/2),2)
-                    dtnd[dtnd > 1] = 1
-                    dtnd[dtnd < 0] = 0
-                    dtnd = (6.371e6 * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
+                    if geographic:
+                        # haversine formula
+                        dtnd = np.power(np.sin(dtr*dlat/2),2) + np.cos(dtr*lat2d) * np.cos(dtr*lat2d.flat[hndx]) * np.power(np.sin(dtr*dlon/2),2)
+                        dtnd[dtnd > 1] = 1
+                        dtnd[dtnd < 0] = 0
+                        dtnd = (6.371e6 * 2 * np.arctan2( np.sqrt(dtnd), np.sqrt(1-dtnd)))
+                    else:
+                        dtnd = np.sqrt(np.power(dlat,2) + np.power(dlon,2))
+
                     #dtnd = np.where(hndx != -1, dtnd, nodata_out)
                     dtnd = np.where(hndx != -1, dtnd, 0)
 
@@ -1933,7 +1938,10 @@ class Grid(object):
                     # calculate angle wrt nearest channel
                     # points toward hndx, so reverse dlon
                     aznd = np.zeros(dem.shape)
-                    aznd = np.arctan2(np.sin(-dtr*dlon),(np.cos(dtr*lat2d)*np.tan(dtr*lat2d.flat[hndx]) - np.sin(dtr*lat2d)*np.cos(-dtr*dlon)))
+                    if geographic:
+                        aznd = np.arctan2(np.sin(-dtr*dlon),(np.cos(dtr*lat2d)*np.tan(dtr*lat2d.flat[hndx]) - np.sin(dtr*lat2d)*np.cos(-dtr*dlon)))
+                    else:
+                        aznd = np.arctan2(-dlon,dlat)
                     aznd = aznd/dtr
                     aznd[aznd < 0] += 360
                     #aznd = np.where(hndx != -1, aznd, 0)
@@ -2965,6 +2973,12 @@ class Grid(object):
         with rasterio.open(file_name, 'w', **profile) as dst:
             dst.write(np.asarray(data), 1)
 
+    def _follow_loop(self,ndx,nodes,num):
+        if num == 0:
+            return ndx
+        else:
+            return nodes[self._follow_loop(ndx,nodes,num-1)]
+
     def extract_profiles(self, fdir, mask, dirmap=None, nodata_in=None, routing='d8',
                          apply_mask=True, ignore_metadata=False, **kwargs):
         """
@@ -3058,6 +3072,12 @@ class Grid(object):
             ixes.append(end)
             while end.any():
                 end = endnodes[end]
+
+                # exclude sinks and loops, up to nreaches
+                nreaches = 8
+                for n in range(2,nreaches+1):
+                    end[self._follow_loop(end,endnodes,n) == end] = 0
+
                 ixes.append(end)
 
             ixes = np.column_stack(ixes)
@@ -3274,15 +3294,13 @@ class Grid(object):
             channel_mask = np.zeros(fdir.shape)
             channel_ids = np.zeros(fdir.shape)
             for index, profile in enumerate(profiles):
-                endpoint = profiles[connections[index]][0]
-                yi, xi = np.unravel_index(profile.tolist(), fdir.shape)
+                yi, xi = np.unravel_index(profile, fdir.shape)
+
                 #channel_mask[yi,xi] = 1
                 #channel_ids[yi,xi] = (index+1)
                 # extract profiles does not mask out missing values; apply here
                 channel_mask[yi,xi] = mask[yi,xi]
                 channel_ids[yi,xi] = (index+1)*mask[yi,xi]
-
-            #channel_mask = np.where(channel_ids >0,1,0)
 
             # create mask of left/right banks
             # for every point in channel_mask, find upstream and downstream
