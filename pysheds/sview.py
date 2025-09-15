@@ -2,7 +2,7 @@ import copy
 import numpy as np
 from . import projection
 from affine import Affine
-from distutils.version import LooseVersion
+from looseversion import LooseVersion
 try:
     import scipy.spatial
     _HAS_SCIPY = True
@@ -81,10 +81,8 @@ class Raster(np.ndarray):
             assert not np.issubdtype(obj.dtype, np.flexible)
         except:
             raise TypeError('`object` and `flexible` dtypes not allowed.')
-        try:
-            assert np.can_cast(viewfinder.nodata, obj.dtype, casting='safe')
-        except:
-            raise TypeError('`nodata` value not representable in dtype of array.')
+        cls._validate_nodata(viewfinder.nodata, obj.dtype)
+            
         # Don't allow original viewfinder and metadata to be modified
         viewfinder = viewfinder.copy()
         metadata = metadata.copy()
@@ -116,6 +114,16 @@ class Raster(np.ndarray):
                                         inherit_metadata=False,
                                         new_metadata=metadata)
         return input_array, viewfinder, metadata
+
+    @staticmethod
+    def _validate_nodata(nodata, dtype):
+        "Checks the NoData value is preserved when cast to the raster dtype"
+        nodata = np.array(nodata)
+        casted = nodata.astype(dtype, casting='unsafe')
+        try:
+            assert (nodata == casted) or np.can_cast(nodata, dtype, casting='safe')
+        except:
+            raise TypeError('`nodata` value not representable in dtype of array.')
 
     @property
     def viewfinder(self):
@@ -287,10 +295,7 @@ class MultiRaster(Raster):
             assert not np.issubdtype(obj.dtype, np.flexible)
         except:
             raise TypeError('`object` and `flexible` dtypes not allowed.')
-        try:
-            assert np.can_cast(viewfinder.nodata, obj.dtype, casting='safe')
-        except:
-            raise TypeError('`nodata` value not representable in dtype of array.')
+        cls._validate_nodata(viewfinder.nodata, obj.dtype)
         # Don't allow original viewfinder and metadata to be modified
         viewfinder = viewfinder.copy()
         metadata = metadata.copy()
@@ -334,7 +339,7 @@ class ViewFinder():
         self.crs = crs
         self.nodata = nodata
         if mask is None:
-            self.mask = np.ones(shape, dtype=np.bool8)
+            self.mask = np.ones(shape, dtype=np.bool_)
         else:
             self.mask = mask
 
@@ -385,10 +390,10 @@ class ViewFinder():
     @mask.setter
     def mask(self, new_mask):
         try:
-            assert (np.min_scalar_type(new_mask) <= np.dtype(np.bool8))
+            assert (np.min_scalar_type(new_mask) <= np.dtype(np.bool_))
         except:
             raise TypeError('`mask` must be of boolean type')
-        new_mask = np.asarray(new_mask).astype(np.bool8)
+        new_mask = np.asarray(new_mask).astype(np.bool_)
         self._mask = new_mask
 
     @property
@@ -621,7 +626,7 @@ class View():
         k, m, n = data.shape
         if out is None:
             out = np.empty((k, *target_view.shape), dtype=dtype)
-        out_mask = np.ones((k, *target_view.shape), dtype=np.bool8)
+        out_mask = np.ones((k, *target_view.shape), dtype=np.bool_)
         for i in range(k):
             slice_viewfinder = ViewFinder(affine=data_view.affine, mask=data_view.mask[i],
                                           nodata=data_view.nodata, crs=data_view.crs)
@@ -971,4 +976,3 @@ class View():
         else:
             raise ValueError('Interpolation method must be one of: `nearest`, `linear`')
         return view
-

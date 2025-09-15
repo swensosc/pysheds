@@ -1,4 +1,5 @@
-# pysheds 
+# pysheds [![Build Status](https://github.com/mdbartos/pysheds/actions/workflows/python-package.yml/badge.svg)](https://github.com/mdbartos/pysheds/actions) [![Coverage Status](https://coveralls.io/repos/github/mdbartos/pysheds/badge.svg?branch=master&service=github)](https://coveralls.io/github/mdbartos/pysheds?branch=master) [![Python Versions](https://img.shields.io/pypi/pyversions/pysheds)](https://pypi.python.org/pypi/pysheds)
+🌎 Simple and fast watershed delineation in python.
 
 ## pysheds extension
 

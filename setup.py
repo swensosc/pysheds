@@ -4,7 +4,7 @@ from setuptools import setup
 
 setup(
     name="pysheds",
-    version="0.3.5",
+    version="0.5",
     description="🌎 Simple and fast watershed delineation in python.",
     long_description="🌎 Simple and fast watershed delineation in python.",
     long_description_content_type="text/x-rst",
@@ -26,6 +26,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: GIS",
         "Topic :: Scientific/Engineering :: Hydrology",
     ],
@@ -33,6 +34,7 @@ setup(
     install_requires=[
         "affine",
         "geojson",
+        "looseversion",
         "numba",
         "numpy",
         "pandas",
