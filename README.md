@@ -15,6 +15,10 @@ Topographic slope and aspect
 
 River network length and slope
 
+# Conventions
+
+This project follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) suggestions and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 # Citing
 
 If you have used this codebase in a publication and wish to cite it, consider citing the zenodo repository:
